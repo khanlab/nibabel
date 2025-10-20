@@ -12,12 +12,15 @@ processing that needs to raise an error, should be in a method, rather
 than in a property, or property-like thing.
 """
 
+import logging
 import operator
 import re
 import warnings
 from functools import cached_property
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from nibabel.optpkg import optional_package
 
@@ -777,20 +780,67 @@ class MultiframeWrapper(Wrapper):
             if curr_parts == 1 or (count == 1 and row_idx != slice_dim_idx):
                 del_indices[row_idx] = count
                 continue
+
+            # diagnostics: log key state for debugging problematic datasets
+            try:
+                frame_indices_shape = frame_indices.shape
+            except Exception:
+                frame_indices_shape = None
+            logger.debug(
+                "Multiframe image_shape: row_idx=%s slice_dim_idx=%s curr_parts=%s frames_per_part=%s n_frames=%s",
+                row_idx,
+                slice_dim_idx,
+                curr_parts,
+                frames_per_part,
+                n_frames,
+            )
+            # Log a compact sample of the row and its unique values
+            try:
+                row_sample = row[:20] if hasattr(row, "__len__") else row
+            except Exception:
+                row_sample = repr(row)
+            try:
+                uniq_sample = np.unique(row)[:20]
+            except Exception:
+                uniq_sample = None
+            logger.debug(
+                "Multiframe image_shape: frame_indices.shape=%r; row_sample=%r; unique_count=%s; unique_sample=%r",
+                frame_indices_shape,
+                row_sample,
+                count,
+                uniq_sample,
+            )
+
             # Replace slice indices with order determined from slice positions along normal
             if row_idx == slice_dim_idx:
+                # If there are >2 image dims (rows, cols, slice, others), this situation is not handled here.
                 if len(shape) > 2:
-                    raise WrapperError('Non-singular index precedes the slice index')
+                    msg = (
+                        "Non-singular index precedes the slice index: "
+                        f"row_idx={row_idx}, slice_dim_idx={slice_dim_idx}, curr_parts={curr_parts}, "
+                        f"count={count}, n_frames={n_frames}, frame_indices_shape={frame_indices_shape}, "
+                        f"row_sample={row_sample}, _frame_slc_ord={getattr(self, '_frame_slc_ord', None)}"
+                    )
+                    logger.error(msg)
+                    raise WrapperError(msg)
+                # use the cached slice ordering computed earlier
                 row = self._frame_slc_ord
                 frame_indices.T[row_idx, :] = row
                 unique = np.unique(row)
                 if len(unique) != count:
-                    raise WrapperError("Number of slice indices and positions don't match")
+                    msg = (
+                        "Number of slice indices and positions don't match: "
+                        f"row_idx={row_idx}, expected_count={count}, found_unique_count={len(unique)}, "
+                        f"n_frames={n_frames}, frame_indices_shape={frame_indices_shape}, row_sample={row_sample}"
+                    )
+                    logger.error(msg)
+                    raise WrapperError(msg)
             elif count == n_frames:
                 if shape[-1] == 'remaining':
                     raise WrapperError('At most one index have ambiguous size')
                 shape.append('remaining')
                 continue
+
             new_parts, leftover = divmod(curr_parts, count)
             expected = new_parts * frames_per_part
             if leftover != 0 or any(np.count_nonzero(row == val) != expected for val in unique):
